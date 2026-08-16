@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>North Carolina School Access & Education Equity</title>
+
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIINfQ3ynLqN5ZzQ+f2F7lYkPtvbWjOmwKk=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7/turf.min.js"></script>
+  <script src="data/saipe_2024.js"></script>
+
+  <style>
+    :root {
+      --ink: #16213e;
+      --muted: #5f6b7a;
+      --panel: rgba(255,255,255,.96);
+      --line: #d7dde5;
+      --accent: #355c7d;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); }
+    body { background: #eef2f6; }
+    #map { width: 100%; height: 100%; }
+    .title-card {
+      position: absolute; z-index: 1000; top: 16px; left: 16px;
+      width: min(520px, calc(100vw - 32px)); background: var(--panel);
+      border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.13);
+    }
+    .title-card h1 { font-size: 20px; margin: 0 0 6px; line-height: 1.2; }
+    .title-card p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .controls {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px;
+    }
+    .controls label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    select {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 8px 9px;
+      background: white; color: var(--ink); font-weight: 600;
+    }
+    .legend {
+      background: var(--panel); padding: 10px 12px; border-radius: 10px;
+      border: 1px solid var(--line); box-shadow: 0 5px 20px rgba(0,0,0,.10);
+      line-height: 1.25; min-width: 190px;
+    }
+    .legend .title { font-weight: 700; font-size: 12px; margin-bottom: 7px; }
+    .legend .row { display: flex; align-items: center; gap: 7px; font-size: 11px; margin: 3px 0; }
+    .legend .swatch { width: 15px; height: 11px; border: 1px solid rgba(0,0,0,.12); }
+    .leaflet-popup-content { line-height: 1.45; min-width: 245px; }
+    .popup-title { font-weight: 800; font-size: 14px; margin-bottom: 7px; }
+    .metric { display: flex; justify-content: space-between; gap: 16px; margin: 3px 0; }
+    .metric span:first-child { color: var(--muted); }
+    .small-note { color: var(--muted); font-size: 10.5px; margin-top: 8px; }
+    .status {
+      position: absolute; z-index: 1200; right: 16px; top: 16px;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 9px 11px; font-size: 11px; box-shadow: 0 5px 20px rgba(0,0,0,.10);
+    }
+    @media (max-width: 650px) {
+      .title-card { top: 10px; left: 10px; width: calc(100vw - 20px); }
+      .title-card h1 { font-size: 17px; }
+      .controls { grid-template-columns: 1fr; }
+      .status { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="title-card">
+    <h1>North Carolina School Access & Education Equity</h1>
+    <p>
+      Explore how economic disadvantage and geography shape access to public education across North Carolina.
+      The map combines school-age poverty, geographic service pressure, and actual public-school site locations.
+      Every composite score is backed by visible raw measures rather than a black-box label.
+    </p>
+    <div class="controls">
+      <div>
+        <label for="geography">Geography</label>
+        <select id="geography">
+          <option value="district">School districts</option>
+          <option value="county">Counties</option>
+        </select>
+      </div>
+      <div>
+        <label for="metric">Map measure</label>
+        <select id="metric">
+          <option value="priority">Combined access & equity priority</option>
+          <option value="poverty">School-age poverty rate</option>
+          <option value="access">Geographic access pressure</option>
+          <option value="sitescarcity">School-site scarcity</option>
+        </select>
+      </div>
+      <div>
+        <label for="schools">School locations</label>
+        <select id="schools">
+          <option value="on">Show public schools</option>
+          <option value="off">Hide public schools</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div id="status" class="status">Loading boundaries & school locations…</div>
+
+<script>
+const map = L.map('map', { zoomControl: false }).setView([35.45, -79.4], 7);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18,
+  attribution: '&copy; OpenStreetMap contributors | Census SAIPE & TIGERweb'
+}).addTo(map);
+
+const DISTRICT_URL =
+  "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/School/MapServer/0/query" +
+  "?where=STATE%3D%2737%27&outFields=GEOID,SDUNI,NAME,BASENAME,AREALAND" +
+  "&returnGeometry=true&outSR=4326&f=geojson";
+
+const COUNTY_URL =
+  "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/1/query" +
+  "?where=STATE%3D%2737%27&outFields=GEOID,COUNTY,NAME,BASENAME,AREALAND" +
+  "&returnGeometry=true&outSR=4326&f=geojson";
+
+const SCHOOL_URL =
+  "https://services1.arcgis.com/Ua5sjt3LWTPigjyD/ArcGIS/rest/services/Public_School_Locations_Current/FeatureServer/0/query" +
+  "?where=STFIP%3D%2737%27&outFields=NCESSCH,LEAID,NAME,CITY,STATE,CNTY,NMCNTY,LOCALE,SCHOOLYEAR,LAT,LON" +
+  "&returnGeometry=true&outSR=4326&f=geojson&resultRecordCount=2000";
+
+const colors = ['#ffffcc','#ffeda0','#fed976','#feb24c','#fd8d3c','#f03b20','#bd0026'];
+const labels = ['Lowest','Low','Lower-middle','Middle','Upper-middle','High','Highest'];
+
+let districtFeatures = [];
+let countyFeatures = [];
+let schoolFeatures = [];
+let activeLayer = null;
+let schoolLayer = null;
+let legend = null;
+
+function percentileRanks(values) {
+  const sorted = [...values].filter(Number.isFinite).sort((a,b)=>a-b);
+  return values.map(v => {
+    if (!Number.isFinite(v) || sorted.length < 2) return null;
+    let count = 0;
+    for (const x of sorted) if (x <= v) count++;
+    return 100 * (count - 1) / (sorted.length - 1);
+  });
+}
+
+function hydrate(features, data, geography) {
+  const povertyVals = [];
+  const accessVals = [];
+
+  features.forEach(f => {
+    const geoid = String(f.properties.GEOID);
+    const d = data[geoid];
+    if (!d) {
+      f.properties._dataMissing = true;
+      povertyVals.push(NaN); accessVals.push(NaN);
+      return;
+    }
+    const areaSqMi = Number(f.properties.AREALAND) / 2589988.110336;
+    const schoolAgePop = geography === 'district'
+      ? d.school_age_population
+      : d.approx_school_age_population;
+
+    const accessPressure = schoolAgePop > 0 ? areaSqMi / (schoolAgePop / 1000) : NaN;
+
+    Object.assign(f.properties, {
+      _name: d.name || f.properties.NAME,
+      _povertyPct: Number(d.school_age_poverty_pct),
+      _povertyCount: Number(d.school_age_poverty),
+      _schoolAgePop: Number(schoolAgePop),
+      _areaSqMi: areaSqMi,
+      _accessPressure: accessPressure,
+      _medianIncome: d.median_household_income || null,
+      _schoolCount: 0,
+      _areaPerSchool: null,
+      _childrenPerSchool: null,
+      _siteScarcityRank: null,
+      _dataMissing: false
+    });
+    povertyVals.push(f.properties._povertyPct);
+    accessVals.push(accessPressure);
+  });
+
+  const povertyRanks = percentileRanks(povertyVals);
+  const accessRanks = percentileRanks(accessVals);
+
+  features.forEach((f, i) => {
+    f.properties._povertyRank = povertyRanks[i];
+    f.properties._accessRank = accessRanks[i];
+    f.properties._priority = Number.isFinite(povertyRanks[i]) && Number.isFinite(accessRanks[i])
+      ? (povertyRanks[i] + accessRanks[i]) / 2 : null;
+  });
+}
+
+
+function attachSchoolsToGeographies() {
+  if (!schoolFeatures.length) return;
+
+  // County assignment is available directly from the NCES school-point attributes.
+  const countyCounts = {};
+  schoolFeatures.forEach(s => {
+    const county = String(s.properties.CNTY || '');
+    if (county.length === 5) countyCounts[county] = (countyCounts[county] || 0) + 1;
+  });
+  countyFeatures.forEach(f => {
+    const geoid = String(f.properties.GEOID);
+    f.properties._schoolCount = countyCounts[geoid] || 0;
+  });
+
+  // District assignment is spatial because NCES LEA IDs and Census SAIPE district GEOIDs
+  // are different identifier systems.
+  districtFeatures.forEach(f => f.properties._schoolCount = 0);
+  for (const school of schoolFeatures) {
+    if (!school.geometry) continue;
+    try {
+      for (const district of districtFeatures) {
+        if (turf.booleanPointInPolygon(school, district)) {
+          district.properties._schoolCount += 1;
+          break;
+        }
+      }
+    } catch (e) {
+      console.warn('School/district spatial assignment issue:', e);
+    }
+  }
+
+  for (const group of [districtFeatures, countyFeatures]) {
+    const scarcityRaw = [];
+    group.forEach(f => {
+      const p = f.properties;
+      p._areaPerSchool = p._schoolCount > 0 ? p._areaSqMi / p._schoolCount : null;
+      p._childrenPerSchool = p._schoolCount > 0 ? p._schoolAgePop / p._schoolCount : null;
+
+      // Equal-weight physical site scarcity: more land per site + more children per site.
+      scarcityRaw.push({
+        area: p._areaPerSchool,
+        children: p._childrenPerSchool
+      });
+    });
+
+    const areaRanks = percentileRanks(scarcityRaw.map(x => x.area));
+    const childRanks = percentileRanks(scarcityRaw.map(x => x.children));
+    group.forEach((f, i) => {
+      f.properties._siteScarcityRank =
+        Number.isFinite(areaRanks[i]) && Number.isFinite(childRanks[i])
+          ? (areaRanks[i] + childRanks[i]) / 2
+          : null;
+
+      // Updated composite: economic need + geographic dispersion + school-site scarcity.
+      const vals = [
+        f.properties._povertyRank,
+        f.properties._accessRank,
+        f.properties._siteScarcityRank
+      ].filter(Number.isFinite);
+      f.properties._priority = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+    });
+  }
+}
+
+function renderSchools() {
+  if (schoolLayer) map.removeLayer(schoolLayer);
+  if (document.getElementById('schools').value === 'off' || !schoolFeatures.length) return;
+
+  schoolLayer = L.geoJSON({type:'FeatureCollection', features:schoolFeatures}, {
+    pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+      radius: 2.8, weight: 0.7, color: '#17324d', fillColor: '#ffffff',
+      fillOpacity: 0.9, opacity: 0.85
+    }),
+    onEachFeature: (f, layer) => {
+      const p = f.properties || {};
+      layer.bindTooltip(
+        `<strong>${p.NAME || 'Public school'}</strong><br>${p.CITY || ''}${p.CITY ? ', ' : ''}${p.STATE || 'NC'}`,
+        {sticky:true}
+      );
+    }
+  }).addTo(map);
+}
+
+function valueFor(f, metric) {
+  if (metric === 'poverty') return f.properties._povertyPct;
+  if (metric === 'access') return f.properties._accessRank;
+  if (metric === 'sitescarcity') return f.properties._siteScarcityRank;
+  return f.properties._priority;
+}
+
+function classIndex(f, metric) {
+  const v = valueFor(f, metric);
+  if (!Number.isFinite(v)) return -1;
+  if (metric === 'poverty') {
+    const cuts = [10,15,20,25,30,35];
+    let i = 0;
+    while (i < cuts.length && v > cuts[i]) i++;
+    return i;
+  }
+  if (v < 14.3) return 0;
+  if (v < 28.6) return 1;
+  if (v < 42.9) return 2;
+  if (v < 57.1) return 3;
+  if (v < 71.4) return 4;
+  if (v < 85.7) return 5;
+  return 6;
+}
+
+function styleFeature(f) {
+  const metric = document.getElementById('metric').value;
+  const idx = classIndex(f, metric);
+  return {
+    color: '#41505f',
+    weight: 0.65,
+    opacity: 0.75,
+    fillColor: idx >= 0 ? colors[idx] : '#d9d9d9',
+    fillOpacity: 0.72
+  };
+}
+
+function fmt(v, digits=1) {
+  return Number.isFinite(v) ? v.toLocaleString(undefined,{maximumFractionDigits:digits}) : 'N/A';
+}
+function money(v) {
+  return Number.isFinite(Number(v)) ? Number(v).toLocaleString(undefined,{style:'currency',currency:'USD',maximumFractionDigits:0}) : 'N/A';
+}
+
+function popupHtml(f, geography) {
+  const p = f.properties;
+  const approx = geography === 'county' ? '≈ ' : '';
+  return `
+    <div class="popup-title">${p._name || p.NAME}</div>
+    <div class="metric"><span>School-age poverty</span><strong>${fmt(p._povertyPct)}%</strong></div>
+    <div class="metric"><span>Children 5–17 in poverty</span><strong>${fmt(p._povertyCount,0)}</strong></div>
+    <div class="metric"><span>${approx}School-age population</span><strong>${fmt(p._schoolAgePop,0)}</strong></div>
+    <div class="metric"><span>Land area</span><strong>${fmt(p._areaSqMi)} sq mi</strong></div>
+    <div class="metric"><span>Public school sites</span><strong>${fmt(p._schoolCount,0)}</strong></div>
+    <div class="metric"><span>Area per school site</span><strong>${fmt(p._areaPerSchool)} sq mi</strong></div>
+    <div class="metric"><span>School-age children per site</span><strong>${fmt(p._childrenPerSchool,0)}</strong></div>
+    <div class="metric"><span>Access pressure</span><strong>${fmt(p._accessPressure)} sq mi / 1k children</strong></div>
+    <div class="metric"><span>Access-pressure percentile</span><strong>${fmt(p._accessRank)} / 100</strong></div>
+    <div class="metric"><span>School-site scarcity</span><strong>${fmt(p._siteScarcityRank)} / 100</strong></div>
+    <div class="metric"><span>Combined priority index</span><strong>${fmt(p._priority)} / 100</strong></div>
+    ${geography === 'county' ? `<div class="metric"><span>Median household income</span><strong>${money(p._medianIncome)}</strong></div>` : ''}
+    <div class="small-note">
+      Higher index = greater relative need. Geographic access and school-site scarcity are spatial proxies, not direct measures of a child's commute or bus ride time.
+      ${geography === 'county' ? 'County school-age population is approximated from SAIPE’s published poverty count and rounded poverty rate.' : ''}
+    </div>`;
+}
+
+function onEachFeature(f, layer, geography) {
+  layer.bindPopup(() => popupHtml(f, geography));
+  layer.on({
+    mouseover: e => e.target.setStyle({ weight: 2, color: '#17212b', fillOpacity: .86 }),
+    mouseout: e => activeLayer && activeLayer.resetStyle(e.target)
+  });
+}
+
+function render() {
+  const geography = document.getElementById('geography').value;
+  const features = geography === 'district' ? districtFeatures : countyFeatures;
+
+  if (activeLayer) map.removeLayer(activeLayer);
+  activeLayer = L.geoJSON({type:'FeatureCollection', features}, {
+    style: styleFeature,
+    onEachFeature: (f,l) => onEachFeature(f,l,geography)
+  }).addTo(map);
+
+  if (features.length) map.fitBounds(activeLayer.getBounds(), {padding:[20,20]});
+  renderSchools();
+  updateLegend();
+}
+
+function updateLegend() {
+  if (legend) legend.remove();
+  const metric = document.getElementById('metric').value;
+  legend = L.control({position:'bottomleft'});
+  legend.onAdd = function() {
+    const div = L.DomUtil.create('div','legend');
+    let title, rows;
+    if (metric === 'poverty') {
+      title = 'School-age poverty rate';
+      rows = ['≤10%','10–15%','15–20%','20–25%','25–30%','30–35%','>35%'];
+    } else {
+      title = metric === 'access'
+        ? 'Access-pressure percentile'
+        : metric === 'sitescarcity'
+          ? 'School-site scarcity percentile'
+          : 'Combined access & equity priority';
+      rows = labels;
+    }
+    div.innerHTML = `<div class="title">${title}</div>` +
+      rows.map((r,i)=>`<div class="row"><span class="swatch" style="background:${colors[i]}"></span><span>${r}</span></div>`).join('');
+    return div;
+  };
+  legend.addTo(map);
+}
+
+async function loadGeo() {
+  const status = document.getElementById('status');
+  try {
+    const [dRes, cRes, sRes] = await Promise.all([
+      fetch(DISTRICT_URL), fetch(COUNTY_URL), fetch(SCHOOL_URL)
+    ]);
+    if (!dRes.ok || !cRes.ok || !sRes.ok) throw new Error('Spatial data request failed');
+    const [dGeo, cGeo, sGeo] = await Promise.all([dRes.json(), cRes.json(), sRes.json()]);
+    districtFeatures = dGeo.features || [];
+    countyFeatures = cGeo.features || [];
+    schoolFeatures = sGeo.features || [];
+
+    hydrate(districtFeatures, window.SAIPE_DISTRICTS, 'district');
+    hydrate(countyFeatures, window.SAIPE_COUNTIES, 'county');
+    attachSchoolsToGeographies();
+
+    render();
+    status.textContent =
+      `${districtFeatures.length} districts • ${countyFeatures.length} counties • ${schoolFeatures.length.toLocaleString()} public schools`;
+  } catch (err) {
+    console.error(err);
+    status.textContent = 'Could not load one or more public spatial data sources';
+  }
+}
+
+document.getElementById('geography').addEventListener('change', render);
+document.getElementById('metric').addEventListener('change', render);
+document.getElementById('schools').addEventListener('change', renderSchools);
+loadGeo();
+</script>
+</body>
+</html>
